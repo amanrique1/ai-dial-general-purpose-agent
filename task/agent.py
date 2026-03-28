@@ -14,86 +14,301 @@ from task.utils.stage import StageProcessor
 
 
 class GeneralPurposeAgent:
+    """
+    An agent that orchestrates LLM interactions with tool-calling capabilities.
+
+    The agent sends messages to a chat completion endpoint, interprets any
+    tool-call requests from the model, executes the corresponding tools,
+    and recursively re-invokes the model until a final text response is
+    produced (i.e. no more tool calls are requested).
+    """
 
     def __init__(
-            self,
-            endpoint: str,
-            system_prompt: str,
-            tools: list[BaseTool],
+        self,
+        endpoint: str,
+        system_prompt: str,
+        tools: list[BaseTool],
     ):
-        #TODO:
-        # 1. Set variables: endpoint, system_prompt, tools
-        # 2. Prepare tools_dict where key will be tool name and vale tool itself. It will help us to find tool faster
-        #    on the tool call step
-        # 3. Create dict with `state` name. Inside this dict we need to add `TOOL_CALL_HISTORY_KEY` with empty array.
-        #    Here, in state, we will 'hide' tool call history. We need it since we need to preserve full conversation history.
-        raise NotImplementedError()
+        """
+        Args:
+            endpoint:      Base URL of the DIAL chat-completion service.
+            system_prompt:  System-level instruction prepended to every request.
+            tools:          Available tools the model may invoke.
+        """
+        self.endpoint = endpoint
+        self.system_prompt = system_prompt
+        self.tools = tools
 
-    async def handle_request(self, deployment_name: str, choice: Choice, request: Request, response: Response) -> Message:
-        #TODO:
-        # 1. Create AsyncDial, don't forget to provide endpoint as base_url and api_key. Api_key you can take from `request` as well as api_version
-        #    JFI: while request you will get Per-request API key (not `dial_api_key` configured in Core config). Read
-        #    more about it -> https://docs.dialx.ai/platform/core/per-request-keys
-        # 2. Create `chunks` with created AsyncDial client (chat -> completions -> create). Provide it with:
-        #    - messages: get messages from `request` and unpack them with `_prepare_messages` method
-        #    - tools: provide list with tool schemas
-        #    - deployment_name
-        #    - make it stream
-        # 3. Create:
-        #   - `tool_call_index_map` (it is empty dict), here we will collect tool calls by their indexes.
-        #      Take a look how tool call streaming output is looks like, it is important! -> https://platform.openai.com/docs/guides/function-calling#streaming
-        #   - `content`, here we will collect the content from streaming
-        # 4. Make async loop through `chunks` and then we need to collect content, tool calls and attachments:
-        #   - If chunk has `choices` then:
-        #       - Get 1st choice `delta`
-        #       - if delta is present:
-        #           - if delta content is present then append this content to `choice` (it will be shown in DIAL Chat
-        #             choice), concat delta content to `content` variable
-        #           - if delta has tool_calls then:
-        #               - iterate through tool_calls:
-        #                   - if tool call has `id` (first chunk of tool call) then add to `tool_call_index_map` new
-        #                     tool_call_delta, key will be index and value tool call delta itself
-        #                   - otherwise: get by tool call delta `index` from the `tool_call_index_map` the tool call and
-        #                     then check if provided tool_call_delta contains `function`, if yes then you need to get from
-        #                     `function` `arguments` (if not present set them as empty string to not attach haphazardly None)
-        #                     as `argument_chunk` and add it to the extracted from map tool_call function arguments
-        # 5. Create `assistant_message`, with role, content and tool_calls. `tool_calls` should be a list with ToolCall
-        #    objects generated from `tool_call_index_map` dict values. to create ToolCall use `validate` method (it
-        #    will show you the notification that it is deprecated but we need to use it because DIAL SDK is built on top of pydentic.v1)
-        # 6. Now we at the point where we need to understand if its 'final result' from orchestration model or not:
-        #    check if `assistant_message` contains `tool_calls`, if yes then we need:
-        #       - create `tasks` list. Iterate through `tool_calls` and call `_process_tool_call` method (do not use
-        #         `await` since we will run tool calls execution asynchronously), also you need to provide `conversation_id`
-        #         you can get it in `request` headers, its name is `x-conversation-id`
-        #       - now `gather` tasks with `asyncio` (here you need to await)
-        #       - to the `state` to `TOOL_CALL_HISTORY_KEY` append `assistant_message` as dict and exclude none from this dict
-        #       - extend the `state` `TOOL_CALL_HISTORY_KEY` with tool_messages that we executed above
-        #       - finally make recursive call
-        # 7. We don't have any tool calls and reasy to finish user request. Set choice with `state` and return `assistant_message`
-        raise NotImplementedError()
+        # Build a lookup table so we can resolve tools by name in O(1).
+        self._tools_dict: dict[str, BaseTool] = {
+            tool.name: tool for tool in tools
+        }
 
-    def _prepare_messages(self, messages: list[Message]) -> list[dict[str, Any]]:
-        #TODO:
-        # 1. Unpack messages with `unpack_messages` method (it is implemented, just check the logic in this method)
-        # 2. Insert as first message the `system_prompt` (probably you have a question why do we need to insert each
-        #    call system prompt, the reason is simple - security, if people will know our system prompt then it will be
-        #    easier to manipulate LLM, so, best practices are to hide system prompt)
-        # 3. Print history: iterate through unpacked messages and print as json (json.dumps)
-        # 4. Return unpacked messages
-        raise NotImplementedError()
+        # Mutable conversation state persisted across recursive calls.
+        # TOOL_CALL_HISTORY_KEY accumulates assistant + tool messages produced
+        # during the current turn so they can be replayed on the next iteration.
+        self.state: dict[str, Any] = {
+            TOOL_CALL_HISTORY_KEY: [],
+        }
 
-    async def _process_tool_call(self, tool_call: ToolCall, choice: Choice, api_key: str, conversation_id: str) -> dict[str, Any]:
-        #TODO:
-        # 1. Get tool name from tool_call function name
-        # 2. Open Stage with StageProcessor (it will be shown in DIAL Chat and Stage serves in our case for
-        #    tool call results representation)
-        # 3. Get tool from `_tools_dict` by tool name
-        # 4. If tool show_in_stage is true then:
-        #   - append content to stage "## Request arguments: \n"
-        #   - append content to stage f"```json\n\r{json.dumps(json.loads(tool_call.function.arguments), indent=2)}\n\r```\n\r"
-        #     it will print arguments as markdown json
-        #   - append content to stage "## Response: \n"
-        # 5. Execute tool
-        # 6. Close stage with StageProcessor
-        # 7. Return tool message as dict and don't forget to exclude none
-        raise NotImplementedError()
+    # ------------------------------------------------------------------
+    # Public entry point
+    # ------------------------------------------------------------------
+
+    async def handle_request(
+        self,
+        deployment_name: str,
+        choice: Choice,
+        request: Request,
+        response: Response,
+    ) -> Message:
+        """
+        Send the conversation to the LLM and return its final assistant
+        message.  If the model requests tool calls, they are executed and
+        the model is called again — repeating until it produces a plain
+        text answer.
+
+        Args:
+            deployment_name: Model deployment to target.
+            choice:          SDK choice object used for streaming content back.
+            request:         Incoming SDK request (carries messages, auth, etc.).
+            response:        SDK response handle (unused directly but forwarded
+                             for potential downstream needs).
+
+        Returns:
+            The final assistant ``Message`` containing the model's text reply.
+        """
+        client = AsyncDial(
+            base_url=self.endpoint,
+            api_key=request.api_key,
+            api_version=request.api_version,
+        )
+
+        # Request a streaming completion with the current conversation history
+        # and the set of available tool definitions.
+        chunks = await client.chat.completions.create(
+            messages=self._prepare_messages(request.messages),
+            tools=[tool.schema for tool in self.tools],
+            stream=True,
+            deployment_name=deployment_name,
+        )
+
+        # Accumulate streamed content and tool-call deltas.
+        content, tool_calls = await self._consume_stream(chunks, choice)
+
+        # Build the assistant message that mirrors what the model produced.
+        assistant_message = Message(
+            role=Role.ASSISTANT,
+            content=content,
+            custom_content=CustomContent(attachments=[]),
+            tool_calls=[
+                ToolCall.validate(tc) for tc in tool_calls.values()
+            ],
+        )
+
+        # If the model requested tool calls, execute them and recurse.
+        if assistant_message.tool_calls:
+            tool_messages = await self._execute_tool_calls(
+                tool_calls=assistant_message.tool_calls,
+                choice=choice,
+                api_key=request.api_key,
+                conversation_id=request.headers["x-conversation-id"],
+            )
+
+            # Persist the assistant message and every tool response so that
+            # the next iteration includes them in the conversation history.
+            self.state[TOOL_CALL_HISTORY_KEY].append(
+                assistant_message.dict(exclude_none=True)
+            )
+            self.state[TOOL_CALL_HISTORY_KEY].extend(tool_messages)
+
+            # Recurse — the model will see the tool results and can either
+            # answer or request additional tool calls.
+            return await self.handle_request(
+                deployment_name=deployment_name,
+                choice=choice,
+                request=request,
+                response=response,
+            )
+
+        # No tool calls — we have the final answer.  Persist state and return.
+        choice.set_state(self.state)
+        return assistant_message
+
+    # ------------------------------------------------------------------
+    # Stream consumption
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    async def _consume_stream(
+        chunks: Any,
+        choice: Choice,
+    ) -> tuple[str, dict[int, Any]]:
+        """
+        Iterate over SSE chunks, forwarding text content to the caller in
+        real time and reassembling any tool-call deltas.
+
+        Returns:
+            A tuple of (accumulated_text, tool_call_index_map) where the
+            map keys are chunk-level indices and values are the merged
+            ``ToolCall`` objects.
+        """
+        content = ""
+        tool_call_index_map: dict[int, Any] = {}
+
+        async for chunk in chunks:
+            if not chunk.choices:
+                continue
+
+            delta = chunk.choices[0].delta
+            if delta is None:
+                continue
+
+            # --- Text content ---
+            if delta.content:
+                choice.append_content(delta.content)
+                content += delta.content
+
+            # --- Tool-call deltas ---
+            if delta.tool_calls:
+                for tc_delta in delta.tool_calls:
+                    if tc_delta.id:
+                        # First fragment for this index — store the skeleton.
+                        tool_call_index_map[tc_delta.index] = tc_delta
+                    else:
+                        # Subsequent fragment — append argument tokens.
+                        existing = tool_call_index_map[tc_delta.index]
+                        if tc_delta.function:
+                            existing.function.arguments += (
+                                tc_delta.function.arguments or ""
+                            )
+
+        return content, tool_call_index_map
+
+    # ------------------------------------------------------------------
+    # Message preparation
+    # ------------------------------------------------------------------
+
+    def _prepare_messages(
+        self, messages: list[Message]
+    ) -> list[dict[str, Any]]:
+        """
+        Build the full message list sent to the LLM.
+
+        Steps:
+            1. Unpack user/assistant messages from the SDK format, merging
+               in any tool-call history accumulated during this turn.
+            2. Prepend the system prompt.
+            3. Log the resulting history for debugging.
+
+        Returns:
+            A list of plain dicts ready for the DIAL client.
+        """
+        unpacked_messages = unpack_messages(
+            messages, self.state[TOOL_CALL_HISTORY_KEY]
+        )
+
+        # Ensure the system prompt is always the first message.
+        unpacked_messages.insert(
+            0,
+            {
+                "role": Role.SYSTEM.value,
+                "content": self.system_prompt,
+            },
+        )
+
+        # Debug logging — helpful for inspecting the conversation window.
+        self._log_history(unpacked_messages)
+
+        return unpacked_messages
+
+    # ------------------------------------------------------------------
+    # Tool execution
+    # ------------------------------------------------------------------
+
+    async def _execute_tool_calls(
+        self,
+        tool_calls: list[ToolCall],
+        choice: Choice,
+        api_key: str,
+        conversation_id: str,
+    ) -> list[dict[str, Any]]:
+        """
+        Run every requested tool call concurrently and return the
+        serialised tool-response messages.
+        """
+        tasks = [
+            self._process_tool_call(
+                tool_call=tc,
+                choice=choice,
+                api_key=api_key,
+                conversation_id=conversation_id,
+            )
+            for tc in tool_calls
+        ]
+        return list(await asyncio.gather(*tasks))
+
+    async def _process_tool_call(
+        self,
+        tool_call: ToolCall,
+        choice: Choice,
+        api_key: str,
+        conversation_id: str,
+    ) -> dict[str, Any]:
+        """
+        Execute a single tool call inside a UI stage and return the
+        resulting message as a plain dict.
+
+        Args:
+            tool_call:        The tool call descriptor from the model.
+            choice:           SDK choice used to create visual stages.
+            api_key:          Forwarded to the tool for authenticated calls.
+            conversation_id:  Current conversation identifier.
+
+        Returns:
+            Serialised tool message (``dict``) with ``None`` values stripped.
+        """
+        tool_name = tool_call.function.name
+        tool = self._tools_dict[tool_name]
+
+        # Open a collapsible stage in the UI so the user can inspect
+        # the tool's request and response.
+        stage = StageProcessor.open_stage(choice, tool_name)
+
+        if tool.show_in_stage:
+            # Render the arguments and a response header inside the stage.
+            formatted_args = json.dumps(
+                json.loads(tool_call.function.arguments), indent=2
+            )
+            stage.append_content("## Request arguments: \n")
+            stage.append_content(f"```json\n\r{formatted_args}\n\r```\n\r")
+            stage.append_content("## Response: \n")
+
+        # Delegate to the concrete tool implementation.
+        tool_message = await tool.execute(
+            ToolCallParams(
+                tool_call=tool_call,
+                stage=stage,
+                choice=choice,
+                api_key=api_key,
+                conversation_id=conversation_id,
+            )
+        )
+
+        # Always close the stage, even if the tool raised earlier
+        # (StageProcessor.close_stage_safely is idempotent).
+        StageProcessor.close_stage_safely(stage)
+
+        return tool_message.dict(exclude_none=True)
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _log_history(messages: list[dict[str, Any]]) -> None:
+        """Print the full conversation history for debugging purposes."""
+        print("\nHistory:")
+        for msg in messages:
+            print(f"     {json.dumps(msg)}")
+        print(f"{'-' * 100}\n")
